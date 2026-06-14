@@ -55,12 +55,40 @@ Configure the following variables in `.env.local`:
 ### 4. Database Initialization
 Paste and run the SQL code in `supabase/schema.sql` inside the **SQL Editor** of your Supabase project.
 
-### 5. Running the Application
-Start the development server:
+### 5. Running the Frontend
+Start the Next.js development server:
 ```bash
 npm run dev
 ```
 Open [http://localhost:3000](http://localhost:3000) to view the application.
+
+### 6. Backend Setup (FastAPI)
+The python backend handles database logic and authentication.
+
+1. Navigate to the backend directory:
+   ```bash
+   cd backend
+   ```
+2. Create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   .\venv\Scripts\activate      # For Windows
+   # source venv/bin/activate   # For macOS/Linux
+   ```
+3. Install the dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Set up your `.env` file in the `backend/` folder:
+   ```env
+   SUPABASE_URL=your_supabase_url
+   SUPABASE_ANON_KEY=your_supabase_anon_key
+   FERNET_SECRET_KEY=your_generated_fernet_key
+   ```
+5. Start the backend server:
+   ```bash
+   uvicorn app:app --reload
+   ```
 
 ---
 
