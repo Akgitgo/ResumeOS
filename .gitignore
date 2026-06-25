@@ -1,38 +1,72 @@
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# local env files
-.env*.local
-.env
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-# Backend / Python
+# ==========================================
+# python / Backend Git Ignore
+# ==========================================
+backend/venv/
 venv/
+ENV/
 env/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.Python
+backend/.env
+.env
 
-# Supabase Local
-.supabase/
+# FastAPI / Uvicorn / testing logs
+*.log
+backend/Model/__pycache__/
+backend/SMTP/__pycache__/
+backend/schema/__pycache__/
+backend/__pycache__/
+
+# Local LaTeX build artifacts
+*.pdf
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+
+# ==========================================
+# Node / Next.js Frontend Git Ignore
+# ==========================================
+frontend/node_modules/
+node_modules/
+frontend/.next/
+.next/
+frontend/out/
+out/
+
+# Local env files
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Next.js build logs and diagnostic files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ==========================================
+# Editor / OS / IDE Files
+# ==========================================
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+.DS_Store
+Thumbs.db

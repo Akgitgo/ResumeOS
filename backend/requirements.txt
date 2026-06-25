@@ -5,3 +5,5 @@ supabase
 pydantic
 email-validator
 cryptography
+groq
+python-multipart    
