@@ -2,8 +2,11 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "ATS Resume Tailor",
-  description: "Tailor your resume to any job description and beat 6 major ATS platforms.",
+  title: "CVCraft AI - Build Professional ATS-Friendly Resumes",
+  description: "Create beautiful, recruiter-ready resumes in minutes. CVCraft AI transforms your experience into polished, ATS-optimized resumes and LaTeX code.",
+  icons: {
+    icon: "/favicon.ico",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -13,3 +16,4 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
+

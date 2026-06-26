@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Response, UploadFile, File
+from fastapi import FastAPI, HTTPException, Response, UploadFile, File, Header
 from fastapi.responses import JSONResponse
 from schema.signup import signUp
 from schema.signin import signIn
@@ -15,6 +15,8 @@ from supabase import create_client
 from cryptography.fernet import Fernet
 from SMTP.utils import send_otp_email, genrate_otp
 from Model.groq_mode import generate_resume_groq
+import jwt
+import datetime
 
 # Load variables from .env
 load_dotenv()
@@ -27,7 +29,47 @@ fernet = Fernet(FERNET_SECRET_KEY.encode())
 supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+JWT_SECRET = os.getenv("FERNET_SECRET_KEY")
+JWT_ALGORITHM = "HS256"
+
+def create_jwt_token(user_id: str) -> str:
+    payload = {
+        "user_id": user_id,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def verify_session(user_id: str, authorization: str = Header(None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired or invalid. Please login again."
+        )
+    token = authorization.split(" ")[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        token_user_id = payload.get("user_id")
+        if not token_user_id:
+            raise HTTPException(status_code=401, detail="Invalid session token.")
+        if token_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this resource.")
+        return token_user_id
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Session has expired. Please login again.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Session token is invalid.")
+
 app = FastAPI()
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for local development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # Resolve pdflatex path — handles Windows (MiKTeX) where it may not be in PATH
 if sys.platform == "win32":
@@ -88,11 +130,46 @@ def sign_in(credentials: signIn):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error verifying password")
         
-    return JSONResponse(status_code=200, content={"message": "Sign In Successful", "id": user.get("id")})
+    token = create_jwt_token(user.get("id"))
+    return JSONResponse(
+        status_code=200,
+        content={
+            "message": "Sign In Successful",
+            "id": user.get("id"),
+            "token": token,
+            "user": {
+                "full_name": user.get("full_name"),
+                "email": user.get("email"),
+                "mobile": user.get("mobile"),
+                "profile_photo_url": user.get("profile_photo_url")
+            }
+        }
+    )
+
+
+# ==========================================
+# ENDPOINT: GET USER PROFILE
+# ==========================================
+# Purpose: Fetch user profile data to display name, photo, and populate edit forms.
+# Input: User ID (in URL).
+# Output: Returns the user's database record.
+@app.get("/api/users/{user_id}/profile")
+async def get_profile(user_id: str, authorization: str = Header(None)):
+    verify_session(user_id, authorization)
+    try:
+        response = supabase_admin.table("users").select("*").eq("id", user_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        return response.data[0]
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.put("/api/users/{user_id}/profile")
-async def update_profile(user_id: str, profile_data: userProfie):
+async def update_profile(user_id: str, profile_data: userProfie, authorization: str = Header(None)):
+    verify_session(user_id, authorization)
     update_data = profile_data.dict(exclude_unset=True)
 
     if not update_data:
@@ -121,7 +198,8 @@ async def update_profile(user_id: str, profile_data: userProfie):
 # Input: User ID (in URL) and multipart form-data image file.
 # Output: Returns success message and the public URL.
 @app.post("/api/users/{user_id}/upload-photo")
-async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...)):
+async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...), authorization: str = Header(None)):
+    verify_session(user_id, authorization)
     try:
         # Validate that it is an image
         if not file.content_type.startswith("image/"):
@@ -130,6 +208,16 @@ async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...)):
         file_bytes = await file.read()
         file_ext = file.filename.split(".")[-1] if "." in file.filename else "png"
         file_path = f"{user_id}/avatar.{file_ext}"
+
+        # Delete any existing files in the user's storage folder to prevent duplicates/orphans
+        try:
+            old_files = supabase_admin.storage.from_("profile-photos").list(path=user_id)
+            if old_files:
+                old_file_names = [f"{user_id}/{f['name']}" for f in old_files if f.get('name') != '.emptyFolderPlaceholder']
+                if old_file_names:
+                    supabase_admin.storage.from_("profile-photos").remove(old_file_names)
+        except Exception as e:
+            print(f"Failed to clear old avatar files: {str(e)}")
 
         # 1. Upload to Supabase Storage bucket 'profile-photos'
         # We use upsert so that subsequent uploads overwrite the old photo
@@ -196,21 +284,23 @@ async def get_templates():
 # Output: Returns the generated raw LaTeX code as text.
 # Flow: Frontend displays this LaTeX in an editor for the user to review/edit or copy to Overleaf.
 @app.post("/api/users/{user_id}/generate-resume")
-async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest):
+async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest, authorization: str = Header(None)):
+    verify_session(user_id, authorization)
     try:
-        latex_result = generate_resume_groq(
+        result = generate_resume_groq(
             user_id=user_id,
             job_description=request.job_description,
             user_instruction=request.user_instruction,
             context_note=request.context_note,
             existing_latex=request.existing_latex,
-            template_id=request.template_id
+            template_id=request.template_id,
+            messages=request.messages
         )
             
         return {
-            "message": "Resume generated successfully",
+            "message": result.get("message", "Resume generated successfully"),
             "provider_used": "groq",
-            "latex_code": latex_result
+            "latex_code": result.get("latex_code", "")
         }
         
     except HTTPException as he:
@@ -229,7 +319,8 @@ async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest):
 # Output: Streams/downloads the compiled PDF file (`resume_{user_id}.pdf`).
 # Flow: Writes .tex to a temp directory, runs pdflatex twice (for refs), returns PDF bytes.
 @app.post("/api/users/{user_id}/compile-pdf")
-async def compile_pdf_endpoint(user_id: str, request: ResumeCompileRequest):
+async def compile_pdf_endpoint(user_id: str, request: ResumeCompileRequest, authorization: str = Header(None)):
+    verify_session(user_id, authorization)
     tmp_dir = tempfile.mkdtemp()
     try:
         tex_path = os.path.join(tmp_dir, "resume.tex")
