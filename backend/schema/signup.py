@@ -7,6 +7,8 @@ class signUp(BaseModel):
     email: Annotated[EmailStr, Field(..., description="The Email of the User", example="temp@gmai.com")]
     mobile: Annotated[str, Field(..., description="The Mobile Number of the User", example="1234567890", pattern=r"^\d{10}$")]
     password: str = Field(..., description="The Password of the User", min_length=8, max_length=15)
+    email_otp: str = Field(..., description="The OTP sent to the user's email")
+    email_otp_token: str = Field(..., description="The JWT token for email OTP")
 
     @field_validator("password")
     @classmethod

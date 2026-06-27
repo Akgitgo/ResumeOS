@@ -26,7 +26,8 @@ import {
   Award,
   BadgeAlert,
   Loader2,
-  ListRestart
+  ListRestart,
+  LayoutTemplate
 } from "lucide-react";
 
 // JWT decoder helper
@@ -50,7 +51,7 @@ export default function Dashboard() {
   const [userId, setUserId] = useState<string | null>(null);
 
   // Layout Tab selection
-  const [activeTab, setActiveTab] = useState<"profile" | "builder">("profile");
+  const [activeTab, setActiveTab] = useState<"profile" | "builder" | "templates">("profile");
   const [profileSubTab, setProfileSubTab] = useState<"personal" | "skills" | "experience" | "projects" | "education" | "others">("personal");
 
   // Conversational Workspace States
@@ -429,6 +430,31 @@ export default function Dashboard() {
     setStatusMessage({ type: "success", text: "New chat session started." });
   };
 
+  const handleSelectTemplate = async (templateId: string) => {
+    setSelectedTemplateId(templateId);
+    
+    if (userId) {
+      try {
+        const token = localStorage.getItem("token");
+        await fetch(`http://127.0.0.1:8000/api/users/${userId}/profile`, {
+          method: "PUT",
+          headers: { 
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify({ ...profile, template_id: templateId })
+        });
+      } catch (err) {
+        console.error("Failed to save template selection to profile", err);
+      }
+    }
+    
+    setActiveTab("builder");
+    setTimeout(() => {
+      handleGenerateResume("Please reformat my exact existing resume data into the newly selected template structure. Keep all content exactly the same, only change the layout and LaTeX styling to match the new template.");
+    }, 100);
+  };
+
   const restoreVersion = (v: { v: number; ts: string; label: string; latex: string }) => {
     setLatexCode(v.latex);
     handleCompilePdf(v.latex);
@@ -551,6 +577,12 @@ export default function Dashboard() {
             className={`w-full px-4 py-3 rounded-xl font-semibold text-sm flex items-center gap-3 transition-colors ${activeTab === "profile" ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" : "hover:bg-slate-100 dark:hover:bg-slate-900/60"}`}
           >
             <User size={18} /> My Profile Info
+          </button>
+          <button
+            onClick={() => setActiveTab("templates")}
+            className={`w-full px-4 py-3 rounded-xl font-semibold text-sm flex items-center gap-3 transition-colors ${activeTab === "templates" ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" : "hover:bg-slate-100 dark:hover:bg-slate-900/60"}`}
+          >
+            <LayoutTemplate size={18} /> Templates
           </button>
           <button
             onClick={() => setActiveTab("builder")}
@@ -1231,6 +1263,80 @@ export default function Dashboard() {
                     </div>
                   )}
 
+                </div>
+              )}
+
+              {/* TAB 1.5: TEMPLATES */}
+              {activeTab === "templates" && (
+                <div className="flex flex-col gap-6 flex-1">
+                  <div className="border-b border-slate-100 dark:border-slate-900 pb-4">
+                    <h2 className="text-2xl font-bold">Resume Templates</h2>
+                    <p className="text-xs text-slate-400 mt-0.5">Select a template to instantly reformat your resume.</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {templates.map((template) => (
+                      <div 
+                        key={template.id} 
+                        className={`rounded-2xl border ${selectedTemplateId === template.id ? 'border-emerald-500 shadow-emerald-500/20' : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950'} shadow-sm transition-all flex flex-col relative overflow-hidden group`}
+                      >
+                        {/* Selected Badge */}
+                        {selectedTemplateId === template.id && (
+                          <div className="absolute top-0 right-0 bg-emerald-500 text-white text-[10px] font-bold px-3 py-1 rounded-bl-xl z-10 shadow-sm">
+                            Active
+                          </div>
+                        )}
+
+                        {/* Top Image Area */}
+                        <div className="w-full h-48 bg-slate-100 dark:bg-slate-900 overflow-hidden relative border-b border-slate-200 dark:border-slate-800">
+                          <img 
+                            src={`/images/templates/${template.id}.png`} 
+                            alt={template.name} 
+                            onError={(e) => {
+                              // Fallback if image doesn't exist
+                              (e.target as HTMLImageElement).src = '/Logo.png';
+                              (e.target as HTMLImageElement).className = 'w-16 h-16 object-contain absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-20';
+                            }}
+                            className="w-full h-full object-cover object-top transition-transform duration-500 group-hover:scale-105"
+                          />
+                        </div>
+
+                        {/* Bottom Content Area */}
+                        <div className="p-5 flex flex-col flex-1 gap-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <h3 className="font-bold text-base leading-tight">{template.name}</h3>
+                            <span className="text-[10px] font-semibold text-indigo-600 bg-indigo-50 dark:bg-indigo-900/30 px-2 py-0.5 rounded-full border border-indigo-100 dark:border-indigo-800">
+                              Free
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 flex-1 leading-relaxed">
+                            {template.description}
+                          </p>
+                          
+                          {/* Buttons */}
+                          <div className="flex items-center gap-3 mt-2 pt-4 border-t border-slate-100 dark:border-slate-800/50">
+                            <button
+                              onClick={() => {
+                                // "Preview" just switches to the builder tab if it's already selected
+                                // If not, we could perhaps just show an image modal, but for now we'll do the same as Use
+                                handleSelectTemplate(template.id);
+                              }}
+                              className="flex-1 py-2.5 rounded-xl text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-center gap-2 transition-colors"
+                            >
+                              <Eye size={14} /> Preview
+                            </button>
+                            <button
+                              onClick={() => handleSelectTemplate(template.id)}
+                              disabled={selectedTemplateId === template.id}
+                              className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${selectedTemplateId === template.id ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-transparent' : 'bg-gradient-to-r from-emerald-500 to-indigo-500 text-white shadow hover:scale-105 active:scale-95'}`}
+                            >
+                              <Code size={14} /> {selectedTemplateId === template.id ? 'Selected' : 'Use Template'}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 

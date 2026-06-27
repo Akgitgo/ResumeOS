@@ -4,6 +4,7 @@ from schema.signup import signUp
 from schema.signin import signIn
 from schema.profile import userProfie
 from schema.prompt import ResumeGenerateRequest, ResumeCompileRequest
+from schema.auth import SendOTPRequest, ForgotPasswordRequest, ResetPasswordRequest, VerifyOTPRequest
 from dotenv import load_dotenv
 import subprocess
 import tempfile
@@ -81,9 +82,112 @@ else:
 def home_page():
     return {"message": "Welcome foundationa Level"}
 
+@app.post("/api/auth/send-otp")
+def send_otp(req: SendOTPRequest):
+    if req.email:
+        res = supabase.table("users").select("id").eq("email", req.email).execute()
+        if res.data:
+            raise HTTPException(status_code=400, detail="The Given email already registered")
+
+    otp = genrate_otp()
+    # Create token that expires in 5 minutes
+    payload = {
+        "otp": otp,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
+    }
+
+    payload["email"] = req.email
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    subject = "Your Verification Code"
+    success = send_otp_email(req.email, subject, otp)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send OTP email")
+    return JSONResponse(status_code=200, content={"message": "OTP sent successfully", "otp_token": token})
+
+@app.post("/api/auth/verify-otp")
+def verify_otp(req: VerifyOTPRequest):
+    try:
+        payload = jwt.decode(req.otp_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="OTP has expired.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid OTP token.")
+
+    if payload.get("otp") != req.otp:
+        raise HTTPException(status_code=400, detail="Incorrect OTP.")
+
+    return JSONResponse(status_code=200, content={"message": "OTP Verified Successfully", "verified": True})
+
+@app.post("/api/auth/forgot-password-otp")
+def forgot_password_otp(req: ForgotPasswordRequest):
+    # Check if user exists
+    response = supabase.table("users").select("id").eq("email", req.email).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="User with this email not found")
+
+    otp = genrate_otp()
+    payload = {
+        "email": req.email,
+        "otp": otp,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    
+    subject = "Password Reset Code"
+    success = send_otp_email(req.email, subject, otp)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send OTP email")
+    
+    return JSONResponse(status_code=200, content={"message": "OTP sent successfully", "otp_token": token})
+
+@app.post("/api/auth/reset-password")
+def reset_password(req: ResetPasswordRequest):
+    try:
+        payload = jwt.decode(req.otp_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid OTP token.")
+
+    if payload.get("otp") != req.otp:
+        raise HTTPException(status_code=400, detail="Incorrect OTP.")
+
+    email = payload.get("email")
+    encrypted_password = fernet.encrypt(req.new_password.encode()).decode()
+
+    try:
+        response = supabase.table("users").update({"password_hash": encrypted_password}).eq("email", email).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        return JSONResponse(status_code=200, content={"message": "Password updated successfully"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # SignUp Page API
 @app.post("/signup")
 def add_users(signUp: signUp):
+    # Check for duplicates early
+    res_email = supabase.table("users").select("id").eq("email", signUp.email).execute()
+    if res_email.data:
+        raise HTTPException(status_code=400, detail="User already exists with this Email")
+        
+    res_mobile = supabase.table("users").select("id").eq("mobile", signUp.mobile).execute()
+    if res_mobile.data:
+        raise HTTPException(status_code=400, detail="User already exists with this Mobile Number")
+
+    # Verify Email OTP
+    try:
+        email_payload = jwt.decode(signUp.email_otp_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="Email OTP has expired.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid Email OTP token.")
+        
+    if email_payload.get("email") != signUp.email:
+        raise HTTPException(status_code=400, detail="Email mismatch in OTP verification.")
+        
+    if email_payload.get("otp") != signUp.email_otp:
+        raise HTTPException(status_code=400, detail="Incorrect Email OTP.")
 
     encypted_password = fernet.encrypt(signUp.password.encode()).decode()
     user_data = {
@@ -147,12 +251,7 @@ def sign_in(credentials: signIn):
     )
 
 
-# ==========================================
-# ENDPOINT: GET USER PROFILE
-# ==========================================
-# Purpose: Fetch user profile data to display name, photo, and populate edit forms.
-# Input: User ID (in URL).
-# Output: Returns the user's database record.
+
 @app.get("/api/users/{user_id}/profile")
 async def get_profile(user_id: str, authorization: str = Header(None)):
     verify_session(user_id, authorization)
@@ -191,12 +290,6 @@ async def update_profile(user_id: str, profile_data: userProfie, authorization: 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ==========================================
-# ENDPOINT: UPLOAD USER PROFILE PHOTO
-# ==========================================
-# Purpose: Upload a profile photo to Supabase Storage and save its URL to the user's database record.
-# Input: User ID (in URL) and multipart form-data image file.
-# Output: Returns success message and the public URL.
 @app.post("/api/users/{user_id}/upload-photo")
 async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...), authorization: str = Header(None)):
     verify_session(user_id, authorization)
@@ -249,11 +342,6 @@ async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...), auth
         raise HTTPException(status_code=500, detail=f"Failed to upload photo: {str(e)}")
 
 
-# ==========================================
-# ENDPOINT 0: GET RESUME TEMPLATES
-# ==========================================
-# Purpose: Fetch list of available LaTeX resume template structures from database.
-# Output: Returns metadata (id, name, description) of templates.
 @app.get("/api/templates")
 async def get_templates():
     try:
@@ -275,14 +363,6 @@ async def get_templates():
         ]
 
 
-# ==========================================
-# ENDPOINT 1: GENERATE LATEX RESUME (Groq AI)
-# ==========================================
-# Purpose: Call Groq (llama-3.3-70b) to write ATS-friendly LaTeX code tailored
-#          to a job description, custom instructions, and a selected layout style.
-# Input: User ID (in URL), job description, custom instructions, optional existing LaTeX, and optional template style ID.
-# Output: Returns the generated raw LaTeX code as text.
-# Flow: Frontend displays this LaTeX in an editor for the user to review/edit or copy to Overleaf.
 @app.post("/api/users/{user_id}/generate-resume")
 async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest, authorization: str = Header(None)):
     verify_session(user_id, authorization)
@@ -309,15 +389,6 @@ async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest, au
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
-# ==========================================
-# ENDPOINT 2: COMPILE LATEX TO PDF (pdflatex Engine)
-# ==========================================
-# Purpose: Receives LaTeX code (either directly from AI or modified by the user)
-#          and compiles it to a downloadable PDF using pdflatex.
-# Input: LaTeX code string.
-# Output: Streams/downloads the compiled PDF file (`resume_{user_id}.pdf`).
-# Flow: Writes .tex to a temp directory, runs pdflatex twice (for refs), returns PDF bytes.
 @app.post("/api/users/{user_id}/compile-pdf")
 async def compile_pdf_endpoint(user_id: str, request: ResumeCompileRequest, authorization: str = Header(None)):
     verify_session(user_id, authorization)
