@@ -59,7 +59,7 @@ LATEX_TEMPLATE = r"""
 
 \newcommand{\resumeItemListStart}{\begin{itemize}[itemsep=0pt, topsep=3pt]}
 \newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-8pt}}
-\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0in, label={}]}
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0in, label={}] }
 \newcommand{\resumeSubHeadingListEnd}{\end{itemize}\vspace{-8pt}}
 
 \begin{document}
@@ -175,8 +175,17 @@ LATEX_TEMPLATE = r"""
 \end{document}
 """
 
+import json
 
-def generate_resume_groq(user_id: str, job_description: str, user_instruction: str = None, context_note: str = None, existing_latex: str = None, template_id: str = None) -> str:
+# ─────────────────────────────────────────────
+# CONTEXT MANAGEMENT STRATEGY
+# ─────────────────────────────────────────────
+# The current LaTeX code IS the ground truth / memory.
+# Every change already made is baked into it.
+# We only need the last N messages of chat for recent context.
+CHAT_WINDOW_SIZE = 6  # Keep last 6 messages (3 user + 3 AI turns)
+
+def generate_resume_groq(user_id: str, job_description: str, user_instruction: str = None, context_note: str = None, existing_latex: str = None, template_id: str = None, messages: list = None) -> dict:
 
     # FIX CIRCULAR IMPORT: Import supabase INSIDE the function
     from app import supabase
@@ -189,100 +198,149 @@ def generate_resume_groq(user_id: str, job_description: str, user_instruction: s
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server Error: {str(e)}")
 
+    # Cache Groq client (avoid re-instantiating on every call)
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-    # Guard: treat missing, blank, or placeholder existing_latex as "generate fresh"
-    is_valid_existing = existing_latex and len(existing_latex.strip()) > 100
-
-    # Resolve style template to use for fresh generation
-    latex_template_to_use = LATEX_TEMPLATE
-    if template_id and not is_valid_existing:
-        try:
-            temp_response = supabase.table("templates").select("latex_code").eq("id", template_id).execute()
-            if temp_response.data and len(temp_response.data) > 0:
-                latex_template_to_use = temp_response.data[0]["latex_code"]
-        except Exception as e:
-            # Fallback silently or log/print if needed
-            print(f"Error fetching template '{template_id}' from Supabase (falling back): {e}")
 
     profile_photo_url = user_data.get("profile_photo_url")
 
-    if is_valid_existing:
-        prompt = f"""
-You are an expert LaTeX resume writer. The user wants to modify their existing resume.
+    # ── SYSTEM PROMPT ──────────────────────────────────────────────────────────
+    # Instructs the model: respond with raw text and code blocks
+    system_prompt = f"""You are an expert LaTeX resume writer specializing in ATS-friendly, Overleaf-compatible resumes.
+Your job is to generate and precisely modify a user's LaTeX resume code based on their requests.
 
-EXISTING LATEX CODE:
-{existing_latex}
+RESPONSE FORMAT (CRITICAL):
+You MUST respond in the following format:
+1. A short, friendly reply (1-3 sentences) describing what you changed.
+2. The FULL, COMPLETE, compilable LaTeX code for the resume wrapped inside a ```latex and ``` code block.
 
-{f'PROFILE PHOTO URL: {profile_photo_url}{chr(10)}' if profile_photo_url else ''}
-{f'ADDITIONAL CONTEXT ABOUT THE USER:{chr(10)}{context_note}{chr(10)}' if context_note else ''}
-USER INSTRUCTIONS (MUST FOLLOW EXACTLY):
-{user_instruction or 'Improve clarity and ATS-friendliness. Keep the same structure.'}
+Example response:
+I have successfully tailored your resume for the backend engineer position, focusing on Python and FastAPI.
+```latex
+\\documentclass[letterpaper,11pt]{{article}}
+% ... rest of the code ...
+\\end{{document}}
+```
 
-RULES:
-- Output ONLY raw, valid, compilable LaTeX. Do NOT wrap in markdown fences.
-- Start exactly with \documentclass.
-- Preserve the exact same template structure, custom commands (\resumeSubheadingWithLinks, \resumeItemListStart, etc.), and section order UNLESS the user explicitly asks to change it.
-- Ensure it compiles on Overleaf. Do NOT use fontspec or setmainfont.
-- ESCAPE ALL SPECIAL LATEX CHARACTERS in user data and text. You MUST escape &, %, $, #, _, {{, and }} with a backslash (e.g., \% or \&). Failure to do so will crash the compiler.
-- PHOTO RULE: A profile photo URL is available at: {profile_photo_url}. If this URL is null/empty, OR if the existing LaTeX code does not contain a placeholder/layout for a profile photo, OR if the user did not explicitly ask in the instructions to add/include a profile photo, do NOT add a profile photo or the graphicx package. If you are instructed to add a photo, use the graphicx package and render it via \includegraphics, but only if the URL is valid and the user explicitly requests it.
+LATEX RULES (violations will crash the compiler - follow strictly):
+- The LaTeX code MUST start exactly with \\documentclass[letterpaper,11pt]{{article}} and end with \\end{{document}}.
+- Allowed packages ONLY: latexsym, fullpage ([empty]), titlesec, enumitem, hyperref ([hidelinks]), fancyhdr, tabularx, fontawesome5, babel ([english]), glyphtounicode (via \\input{{glyphtounicode}}).
+- Forbidden packages: fontspec, setmainfont, xcolor, geometry, tikz, multicol, array.
+- Always escape special LaTeX characters in text content: & → \\&, % → \\%, $ → \\$, # → \\#, _ → \\_
+- Preserve all custom commands: \\resumeItem, \\resumeSubheadingWithLinks (6 args), \\resumeItemListStart, \\resumeItemListEnd, \\resumeSubHeadingListStart, \\resumeSubHeadingListEnd.
+- PHOTO RULE: Profile photo URL = {profile_photo_url or 'None'}. Only include photo (via graphicx + \\includegraphics) if URL is non-empty AND user explicitly requested it.
+
+MODIFICATION RULE (for follow-up turns):
+When modifying an existing resume, make SURGICAL edits — only change the parts the user asked about.
+Preserve all other sections exactly as they are in the provided current LaTeX code.
 """
-    else:
-        prompt = f"""
-You are an expert LaTeX resume writer specializing in ATS-friendly, Overleaf-compatible resumes.
 
-YOUR TASK:
-Generate a complete, compilable LaTeX resume by filling the REFERENCE TEMPLATE below with the USER DATA provided.
-Tailor all content to the JOB DESCRIPTION. Follow the USER INSTRUCTIONS exactly.
+    is_first_turn = (not existing_latex or not existing_latex.strip()) or (not messages or len(messages) == 0)
 
-REFERENCE TEMPLATE — COPY THIS STRUCTURE EXACTLY (same \\documentclass, same packages, same custom commands, same section order):
-{latex_template_to_use}
+    if is_first_turn:
+        # ── FIRST TURN: Generate from profile data + template ─────────────────
+        latex_template_to_use = LATEX_TEMPLATE
+        if template_id:
+            try:
+                temp_response = supabase.table("templates").select("latex_code").eq("id", template_id).execute()
+                if temp_response.data and len(temp_response.data) > 0:
+                    latex_template_to_use = temp_response.data[0]["latex_code"]
+            except Exception as e:
+                print(f"Error fetching template '{template_id}': {e}")
 
+        initial_prompt = f"""Generate a complete LaTeX resume using the user's profile data and the provided template structure.
 
-==== STRICT RULES (violating ANY rule is WRONG) ====
-1. Output ONLY raw LaTeX. NO markdown fences (no ```latex, no ```). Start with \\documentclass[letterpaper,11pt]{{article}}.
-2. Use EXACTLY these packages and NO others: latexsym, fullpage (with [empty]), titlesec, enumitem, hyperref (with [hidelinks]), fancyhdr, tabularx, fontawesome5, babel (with [english]), and glyphtounicode via \\input{{glyphtounicode}} (Note: graphicx is allowed ONLY if adding a profile photo as per the PHOTO RULE).
-3. FORBIDDEN packages — do NOT use: fontspec, setmainfont, xcolor, geometry, tikz, multicol, array.
-4. Keep EXACTLY the same custom commands defined in the template: \\resumeItem, \\resumeSubheadingWithLinks (6 args), \\resumeItemListStart, \\resumeItemListEnd, \\resumeSubHeadingListStart, \\resumeSubHeadingListEnd.
-5. Icons: use \\faGithub, \\faLinkedin, \\faEnvelope, \\faPhone, \\faCode, \\faGlobe from fontawesome5.
-6. All links via \\href{{URL}}{{text}}. No raw URLs visible in text.
-7. ATS-safe — no \\includegraphics (except for the profile photo if permitted by the PHOTO RULE), no image-based text.
-8. Default section order: Summary → Skills → Experience → Projects → Certifications → Achievements → Education. Change ONLY if the USER INSTRUCTIONS explicitly say so.
-9. Fill REAL user data. If a field is missing in user data, omit that section silently. NO placeholders like [NAME] or [YOUR COMPANY].
-10. ESCAPE ALL SPECIAL LATEX CHARACTERS. You MUST escape &, %, $, #, _, {{, and }} with a backslash (e.g., \\% or \\&). Failure to do so will crash the compiler.
-11. Use em-dash as --- (three hyphens), never paste Unicode em-dash (—) character directly.
-12. PHOTO RULE: The user's profile photo URL is: {profile_photo_url}. If this URL is null/empty, OR if the selected template does not have a design/placeholder for a photo, OR if the user has not explicitly requested to include/add a profile photo in their instructions, do NOT add any photo or compile commands for a photo, and do not use the graphicx package. Only include a photo (via graphicx and \\includegraphics) if the URL is provided, the template layout supports it, and the user explicitly requested it.
-
-USER DATA (from profile):
+=== USER PROFILE DATA ===
 {user_data}
 
-JOB DESCRIPTION (tailor resume keywords to match this):
-{job_description if job_description else 'No job description provided. Generate a general professional resume.'}
+=== TEMPLATE STRUCTURE TO FOLLOW ===
+{latex_template_to_use}
 
-{f'EXTRA CONTEXT (important background, apply this knowledge when writing):{chr(10)}{context_note}{chr(10)}' if context_note else ''}
-USER INSTRUCTIONS (follow these exactly — they override defaults):
-{user_instruction or 'Make it a clean 1-page professional resume.'}
+=== TARGET JOB DESCRIPTION (optimize resume keywords for this role) ===
+{job_description if job_description else 'None provided — generate a general professional resume.'}
 
-Generate the full resume LaTeX code now. Remember: start with \\documentclass, end with \\end{{document}}.
+=== USER CUSTOM INSTRUCTIONS ===
+{user_instruction or 'Generate a clean, 1-page ATS-friendly professional resume.'}
 """
+        if context_note:
+            initial_prompt += f"\n=== ADDITIONAL CONTEXT NOTES ===\n{context_note}"
 
+        groq_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": initial_prompt}
+        ]
+
+    else:
+        # ── FOLLOW-UP TURNS: Sliding window context + LaTeX as ground truth ───
+        groq_messages = [{"role": "system", "content": system_prompt}]
+
+        # Pinned context block (job description + profile — always present)
+        pinned_context = f"""=== PINNED CONTEXT (always relevant) ===
+User Profile: {user_data}
+Target Job Description: {job_description or 'None'}"""
+        if context_note:
+            pinned_context += f"\nAdditional Context Notes: {context_note}"
+        groq_messages.append({"role": "system", "content": pinned_context})
+
+        # Sliding window: use only the last CHAT_WINDOW_SIZE messages
+        recent_history = messages[-(CHAT_WINDOW_SIZE + 1):-1] if len(messages) > 1 else []
+        for msg in recent_history:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role in ("user", "assistant"):
+                groq_messages.append({"role": role, "content": content})
+
+        # Inject current LaTeX code as ground truth state
+        if existing_latex:
+            groq_messages.append({
+                "role": "system",
+                "content": (
+                    "=== CURRENT RESUME LaTeX CODE (this is the authoritative current state) ===\n"
+                    "Edit ONLY the parts the user requests. Return the FULL modified LaTeX.\n\n"
+                    f"{existing_latex}"
+                )
+            })
+
+        # The current user request (latest message from the client)
+        current_request = messages[-1].get("content", "") if messages else user_instruction or ""
+        if current_request:
+            groq_messages.append({"role": "user", "content": current_request})
 
     try:
         chat_completion = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
+            messages=groq_messages,
             model="llama-3.3-70b-versatile",
+            temperature=0.3,   # Lower temp → more precise edits, less hallucination
         )
 
-        latex_code = chat_completion.choices[0].message.content.strip()
+        response_content = chat_completion.choices[0].message.content.strip()
+        
+        # Parse the message and LaTeX code using regex
+        import re
+        code_match = re.search(r"```latex(.*?)```", response_content, re.DOTALL)
+        latex_code = ""
+        if code_match:
+            latex_code = code_match.group(1).strip()
+        else:
+            # Fallback to matching documentclass to end{document}
+            doc_match = re.search(r"(\\documentclass.*\\end\{document\})", response_content, re.DOTALL)
+            if doc_match:
+                latex_code = doc_match.group(1).strip()
+        
+        # The message is whatever is before the code block
+        message = response_content.split("```latex")[0].strip() if "```latex" in response_content else "Resume updated."
+        
+        if not latex_code:
+            raise ValueError("No LaTeX code blocks found in model response.")
 
-        # Strip any accidental markdown fences
-        if latex_code.startswith("```"):
-            lines = latex_code.split('\n')
-            if lines[0].startswith("```latex") or lines[0].startswith("```"):
-                latex_code = '\n'.join(lines[1:])
-            if latex_code.endswith("```"):
-                latex_code = latex_code[:-3].strip()
+        return {
+            "message": message,
+            "latex_code": latex_code
+        }
 
-        return latex_code
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating LaTeX resume with Groq: {str(e)}")
+        # Last resort: return existing code unchanged so user isn't left with nothing
+        return {
+            "message": f"There was a formatting issue with the AI response: {str(e)}. Please try again.",
+            "latex_code": existing_latex or ""
+        }
+

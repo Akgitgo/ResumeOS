@@ -20,7 +20,7 @@ def genrate_otp(length=6):
 
     characters= string.ascii_lowercase + string.digits
 
-    otp = ''.join(random.choice(characters, k=length))
+    otp = ''.join(random.choices(characters, k=length))
     return otp
 
 def send_otp_email(to_email: str, subject: str, otp: str):
@@ -47,7 +47,7 @@ def send_otp_email(to_email: str, subject: str, otp: str):
         <html>
           <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
             <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
-              <h2 style="color: #333333; text-align: center;">AlgoVault Authentication</h2>
+              <h2 style="color: #333333; text-align: center;">CVCraft AI Authentication</h2>
               <p style="color: #555555; font-size: 16px;">Hello,</p>
               <p style="color: #555555; font-size: 16px;">You requested a One-Time Password (OTP) for <strong>{subject}</strong>. Please use the code below to complete your process.</p>
               
@@ -60,7 +60,7 @@ def send_otp_email(to_email: str, subject: str, otp: str):
               <p style="color: #777777; font-size: 14px; text-align: center;">This code will expire in 5 minutes.</p>
               <p style="color: #777777; font-size: 14px; text-align: center;">If you did not request this code, please ignore this email.</p>
               <hr style="border: none; border-top: 1px solid #eeeeee; margin-top: 30px; margin-bottom: 20px;">
-              <p style="color: #aaaaaa; font-size: 12px; text-align: center;">&copy; 2024 AlgoVault. All rights reserved.</p>
+              <p style="color: #aaaaaa; font-size: 12px; text-align: center;">&copy; 2024 CVCraft AI. All rights reserved.</p>
             </div>
           </body>
         </html>

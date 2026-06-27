@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 class ResumeGenerateRequest(BaseModel):
     job_description: str = Field(
@@ -30,7 +30,12 @@ class ResumeGenerateRequest(BaseModel):
         default=None,
         description="The ID of the template style to use for generating a fresh resume"
     )
+    messages: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Optional chat messages history for conversational interactive modifications"
+    )
 
 
 class ResumeCompileRequest(BaseModel):
     latex_code: str = Field(..., description="The LaTeX code to compile into a PDF")
+

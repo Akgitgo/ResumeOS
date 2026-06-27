@@ -1,9 +1,10 @@
-from fastapi import FastAPI, HTTPException, Response, UploadFile, File
+from fastapi import FastAPI, HTTPException, Response, UploadFile, File, Header
 from fastapi.responses import JSONResponse
 from schema.signup import signUp
 from schema.signin import signIn
 from schema.profile import userProfie
 from schema.prompt import ResumeGenerateRequest, ResumeCompileRequest
+from schema.auth import SendOTPRequest, ForgotPasswordRequest, ResetPasswordRequest, VerifyOTPRequest
 from dotenv import load_dotenv
 import subprocess
 import tempfile
@@ -15,6 +16,8 @@ from supabase import create_client
 from cryptography.fernet import Fernet
 from SMTP.utils import send_otp_email, genrate_otp
 from Model.groq_mode import generate_resume_groq
+import jwt
+import datetime
 
 # Load variables from .env
 load_dotenv()
@@ -27,7 +30,47 @@ fernet = Fernet(FERNET_SECRET_KEY.encode())
 supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+JWT_SECRET = os.getenv("FERNET_SECRET_KEY")
+JWT_ALGORITHM = "HS256"
+
+def create_jwt_token(user_id: str) -> str:
+    payload = {
+        "user_id": user_id,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def verify_session(user_id: str, authorization: str = Header(None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired or invalid. Please login again."
+        )
+    token = authorization.split(" ")[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        token_user_id = payload.get("user_id")
+        if not token_user_id:
+            raise HTTPException(status_code=401, detail="Invalid session token.")
+        if token_user_id != user_id:
+            raise HTTPException(status_code=403, detail="Unauthorized access to this resource.")
+        return token_user_id
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Session has expired. Please login again.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Session token is invalid.")
+
 app = FastAPI()
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for local development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # Resolve pdflatex path — handles Windows (MiKTeX) where it may not be in PATH
 if sys.platform == "win32":
@@ -39,9 +82,112 @@ else:
 def home_page():
     return {"message": "Welcome foundationa Level"}
 
+@app.post("/api/auth/send-otp")
+def send_otp(req: SendOTPRequest):
+    if req.email:
+        res = supabase.table("users").select("id").eq("email", req.email).execute()
+        if res.data:
+            raise HTTPException(status_code=400, detail="The Given email already registered")
+
+    otp = genrate_otp()
+    # Create token that expires in 5 minutes
+    payload = {
+        "otp": otp,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
+    }
+
+    payload["email"] = req.email
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    subject = "Your Verification Code"
+    success = send_otp_email(req.email, subject, otp)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send OTP email")
+    return JSONResponse(status_code=200, content={"message": "OTP sent successfully", "otp_token": token})
+
+@app.post("/api/auth/verify-otp")
+def verify_otp(req: VerifyOTPRequest):
+    try:
+        payload = jwt.decode(req.otp_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="OTP has expired.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid OTP token.")
+
+    if payload.get("otp") != req.otp:
+        raise HTTPException(status_code=400, detail="Incorrect OTP.")
+
+    return JSONResponse(status_code=200, content={"message": "OTP Verified Successfully", "verified": True})
+
+@app.post("/api/auth/forgot-password-otp")
+def forgot_password_otp(req: ForgotPasswordRequest):
+    # Check if user exists
+    response = supabase.table("users").select("id").eq("email", req.email).execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail="User with this email not found")
+
+    otp = genrate_otp()
+    payload = {
+        "email": req.email,
+        "otp": otp,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    
+    subject = "Password Reset Code"
+    success = send_otp_email(req.email, subject, otp)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to send OTP email")
+    
+    return JSONResponse(status_code=200, content={"message": "OTP sent successfully", "otp_token": token})
+
+@app.post("/api/auth/reset-password")
+def reset_password(req: ResetPasswordRequest):
+    try:
+        payload = jwt.decode(req.otp_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid OTP token.")
+
+    if payload.get("otp") != req.otp:
+        raise HTTPException(status_code=400, detail="Incorrect OTP.")
+
+    email = payload.get("email")
+    encrypted_password = fernet.encrypt(req.new_password.encode()).decode()
+
+    try:
+        response = supabase.table("users").update({"password_hash": encrypted_password}).eq("email", email).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        return JSONResponse(status_code=200, content={"message": "Password updated successfully"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # SignUp Page API
 @app.post("/signup")
 def add_users(signUp: signUp):
+    # Check for duplicates early
+    res_email = supabase.table("users").select("id").eq("email", signUp.email).execute()
+    if res_email.data:
+        raise HTTPException(status_code=400, detail="User already exists with this Email")
+        
+    res_mobile = supabase.table("users").select("id").eq("mobile", signUp.mobile).execute()
+    if res_mobile.data:
+        raise HTTPException(status_code=400, detail="User already exists with this Mobile Number")
+
+    # Verify Email OTP
+    try:
+        email_payload = jwt.decode(signUp.email_otp_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="Email OTP has expired.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Invalid Email OTP token.")
+        
+    if email_payload.get("email") != signUp.email:
+        raise HTTPException(status_code=400, detail="Email mismatch in OTP verification.")
+        
+    if email_payload.get("otp") != signUp.email_otp:
+        raise HTTPException(status_code=400, detail="Incorrect Email OTP.")
 
     encypted_password = fernet.encrypt(signUp.password.encode()).decode()
     user_data = {
@@ -88,11 +234,41 @@ def sign_in(credentials: signIn):
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error verifying password")
         
-    return JSONResponse(status_code=200, content={"message": "Sign In Successful", "id": user.get("id")})
+    token = create_jwt_token(user.get("id"))
+    return JSONResponse(
+        status_code=200,
+        content={
+            "message": "Sign In Successful",
+            "id": user.get("id"),
+            "token": token,
+            "user": {
+                "full_name": user.get("full_name"),
+                "email": user.get("email"),
+                "mobile": user.get("mobile"),
+                "profile_photo_url": user.get("profile_photo_url")
+            }
+        }
+    )
+
+
+
+@app.get("/api/users/{user_id}/profile")
+async def get_profile(user_id: str, authorization: str = Header(None)):
+    verify_session(user_id, authorization)
+    try:
+        response = supabase_admin.table("users").select("*").eq("id", user_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="User not found")
+        return response.data[0]
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.put("/api/users/{user_id}/profile")
-async def update_profile(user_id: str, profile_data: userProfie):
+async def update_profile(user_id: str, profile_data: userProfie, authorization: str = Header(None)):
+    verify_session(user_id, authorization)
     update_data = profile_data.dict(exclude_unset=True)
 
     if not update_data:
@@ -114,14 +290,9 @@ async def update_profile(user_id: str, profile_data: userProfie):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ==========================================
-# ENDPOINT: UPLOAD USER PROFILE PHOTO
-# ==========================================
-# Purpose: Upload a profile photo to Supabase Storage and save its URL to the user's database record.
-# Input: User ID (in URL) and multipart form-data image file.
-# Output: Returns success message and the public URL.
 @app.post("/api/users/{user_id}/upload-photo")
-async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...)):
+async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...), authorization: str = Header(None)):
+    verify_session(user_id, authorization)
     try:
         # Validate that it is an image
         if not file.content_type.startswith("image/"):
@@ -130,6 +301,16 @@ async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...)):
         file_bytes = await file.read()
         file_ext = file.filename.split(".")[-1] if "." in file.filename else "png"
         file_path = f"{user_id}/avatar.{file_ext}"
+
+        # Delete any existing files in the user's storage folder to prevent duplicates/orphans
+        try:
+            old_files = supabase_admin.storage.from_("profile-photos").list(path=user_id)
+            if old_files:
+                old_file_names = [f"{user_id}/{f['name']}" for f in old_files if f.get('name') != '.emptyFolderPlaceholder']
+                if old_file_names:
+                    supabase_admin.storage.from_("profile-photos").remove(old_file_names)
+        except Exception as e:
+            print(f"Failed to clear old avatar files: {str(e)}")
 
         # 1. Upload to Supabase Storage bucket 'profile-photos'
         # We use upsert so that subsequent uploads overwrite the old photo
@@ -161,11 +342,6 @@ async def upload_photo_endpoint(user_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Failed to upload photo: {str(e)}")
 
 
-# ==========================================
-# ENDPOINT 0: GET RESUME TEMPLATES
-# ==========================================
-# Purpose: Fetch list of available LaTeX resume template structures from database.
-# Output: Returns metadata (id, name, description) of templates.
 @app.get("/api/templates")
 async def get_templates():
     try:
@@ -187,30 +363,24 @@ async def get_templates():
         ]
 
 
-# ==========================================
-# ENDPOINT 1: GENERATE LATEX RESUME (Groq AI)
-# ==========================================
-# Purpose: Call Groq (llama-3.3-70b) to write ATS-friendly LaTeX code tailored
-#          to a job description, custom instructions, and a selected layout style.
-# Input: User ID (in URL), job description, custom instructions, optional existing LaTeX, and optional template style ID.
-# Output: Returns the generated raw LaTeX code as text.
-# Flow: Frontend displays this LaTeX in an editor for the user to review/edit or copy to Overleaf.
 @app.post("/api/users/{user_id}/generate-resume")
-async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest):
+async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest, authorization: str = Header(None)):
+    verify_session(user_id, authorization)
     try:
-        latex_result = generate_resume_groq(
+        result = generate_resume_groq(
             user_id=user_id,
             job_description=request.job_description,
             user_instruction=request.user_instruction,
             context_note=request.context_note,
             existing_latex=request.existing_latex,
-            template_id=request.template_id
+            template_id=request.template_id,
+            messages=request.messages
         )
             
         return {
-            "message": "Resume generated successfully",
+            "message": result.get("message", "Resume generated successfully"),
             "provider_used": "groq",
-            "latex_code": latex_result
+            "latex_code": result.get("latex_code", "")
         }
         
     except HTTPException as he:
@@ -219,17 +389,9 @@ async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
-# ==========================================
-# ENDPOINT 2: COMPILE LATEX TO PDF (pdflatex Engine)
-# ==========================================
-# Purpose: Receives LaTeX code (either directly from AI or modified by the user)
-#          and compiles it to a downloadable PDF using pdflatex.
-# Input: LaTeX code string.
-# Output: Streams/downloads the compiled PDF file (`resume_{user_id}.pdf`).
-# Flow: Writes .tex to a temp directory, runs pdflatex twice (for refs), returns PDF bytes.
 @app.post("/api/users/{user_id}/compile-pdf")
-async def compile_pdf_endpoint(user_id: str, request: ResumeCompileRequest):
+async def compile_pdf_endpoint(user_id: str, request: ResumeCompileRequest, authorization: str = Header(None)):
+    verify_session(user_id, authorization)
     tmp_dir = tempfile.mkdtemp()
     try:
         tex_path = os.path.join(tmp_dir, "resume.tex")
