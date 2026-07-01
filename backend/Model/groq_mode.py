@@ -185,10 +185,11 @@ import json
 # We only need the last N messages of chat for recent context.
 CHAT_WINDOW_SIZE = 6  # Keep last 6 messages (3 user + 3 AI turns)
 
-def generate_resume_groq(user_id: str, job_description: str, user_instruction: str = None, context_note: str = None, existing_latex: str = None, template_id: str = None, messages: list = None) -> dict:
+def generate_resume_groq(user_id: str, job_description: str, user_instruction: str = None, context_note: str = None, existing_latex: str = None, messages: list = None) -> dict:
 
     # FIX CIRCULAR IMPORT: Import supabase INSIDE the function
     from app import supabase
+    # from Model.rag_engine import query_ats_knowledge
 
     try:
         user_response = supabase.table("users").select("*").eq("id", user_id).execute()
@@ -197,6 +198,11 @@ def generate_resume_groq(user_id: str, job_description: str, user_instruction: s
         user_data = user_response.data[0]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server Error: {str(e)}")
+
+    # Retrieve ATS and template guidance from RAG database (Temporarily disabled)
+    # rag_query = f"{job_description or ''} {user_instruction or ''}".strip()
+    # ats_guidance = query_ats_knowledge(rag_query, k=3) if rag_query else ""
+    ats_guidance = ""
 
     # Cache Groq client (avoid re-instantiating on every call)
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -223,36 +229,66 @@ I have successfully tailored your resume for the backend engineer position, focu
 
 LATEX RULES (violations will crash the compiler - follow strictly):
 - The LaTeX code MUST start exactly with \\documentclass[letterpaper,11pt]{{article}} and end with \\end{{document}}.
-- Allowed packages ONLY: latexsym, fullpage ([empty]), titlesec, enumitem, hyperref ([hidelinks]), fancyhdr, tabularx, fontawesome5, babel ([english]), glyphtounicode (via \\input{{glyphtounicode}}).
+- Allowed packages ONLY: latexsym, fullpage ([empty]), titlesec, enumitem, hyperref ([hidelinks]), fancyhdr, tabularx, fontawesome5, babel ([english]), glyphtounicode (via \\input{{glyphtounicode}}), graphicx.
 - Forbidden packages: fontspec, setmainfont, xcolor, geometry, tikz, multicol, array.
 - Always escape special LaTeX characters in text content: & → \\&, % → \\%, $ → \\$, # → \\#, _ → \\_
 - Preserve all custom commands: \\resumeItem, \\resumeSubheadingWithLinks (6 args), \\resumeItemListStart, \\resumeItemListEnd, \\resumeSubHeadingListStart, \\resumeSubHeadingListEnd.
-- PHOTO RULE: Profile photo URL = {profile_photo_url or 'None'}. Only include photo (via graphicx + \\includegraphics) if URL is non-empty AND user explicitly requested it.
+- PHOTO & HEADER RULE: 
+  - Profile photo URL = {profile_photo_url or 'None'}.
+  - ONLY include the profile photo if:
+    1. The user explicitly requests/mentions adding their photo in the prompt.
+    2. AND the Profile photo URL is not 'None'.
+  - If the user explicitly asks for a photo but the Profile photo URL is 'None', do NOT include any image box in the LaTeX code. Instead, inform the user in your text reply: "Please upload your profile photo first in the UI before requesting it."
+  - When the photo is included, you MUST fit all contact details and profile links (Phone, Email, GitHub, LinkedIn, Portfolio, LeetCode, etc.) on a SINGLE LINE inside the text minipage. To prevent wrapping:
+    - Use a smaller font size (e.g. `\\footnotesize` or `\\scriptsize`) for the links line.
+    - Keep separators compact (e.g. `\\quad` or `|` with minimal whitespace like `\\hspace{{3pt}} | \\hspace{{3pt}}`).
+    - Use side-by-side minipages (e.g. `0.78\\textwidth` for text and `0.18\\textwidth` for photo).
+  - Use the filename "profile_photo.png" inside \\includegraphics (do NOT use the long web URL).
+  - Example Layout (Photo on the RIGHT, links kept strictly on one line):
+    ```latex
+    \\begin{{minipage}}[b]{{0.78\\textwidth}}
+      \\raggedright
+      {{\\Huge \\scshape [FULL NAME]}} \\\\ \\vspace{{2pt}}
+      \\textbf{{\\large [TITLES]}} \\\\ \\vspace{{5pt}}
+      {{\\footnotesize \\faPhone\\ [PHONE] \\hspace{{4pt}} | \\hspace{{4pt}} \\faEnvelope\\ [EMAIL] \\hspace{{4pt}} | \\hspace{{4pt}} \\faGithub\\ \\href{{[URL]}}{{GitHub}} \\hspace{{4pt}} | \\hspace{{4pt}} \\faLinkedin\\ \\href{{[URL]}}{{LinkedIn}}}}
+    \\end{{minipage}}
+    \\hfill
+    \\begin{{minipage}}[b]{{0.18\\textwidth}}
+      \\raggedleft
+      \\includegraphics[width=\\linewidth,height=2.3cm,keepaspectratio]{{profile_photo.png}}
+    \\end{{minipage}}
+    ```
+  - Position:
+    - If user requests the photo on the LEFT: Put the photo minipage first, then the text minipage.
+    - If user requests the photo on the RIGHT: Put the text minipage first, then the photo minipage.
+  - Size: Use \\includegraphics[width=\\linewidth,height=2.3cm,keepaspectratio]{{profile_photo.png}}. Ensure the details and photo do not overlap.
+
 
 MODIFICATION RULE (for follow-up turns):
 When modifying an existing resume, make SURGICAL edits — only change the parts the user asked about.
 Preserve all other sections exactly as they are in the provided current LaTeX code.
 """
 
+    if ats_guidance:
+        system_prompt += f"""
+=== ATS OPTIMIZATION RULES (FOLLOW STRICTLY) ===
+Below are rules extracted from our recruitment & ATS database. You must apply these techniques/formatting rules (e.g. key phrases to use, section priorities, layout structure, wordings) to score high:
+{ats_guidance}
+================================================
+"""
+
     is_first_turn = (not existing_latex or not existing_latex.strip()) or (not messages or len(messages) == 0)
 
     if is_first_turn:
-        # ── FIRST TURN: Generate from profile data + template ─────────────────
+        # ── FIRST TURN: Generate from profile data + fallback template ─────────────────
         latex_template_to_use = LATEX_TEMPLATE
-        if template_id:
-            try:
-                temp_response = supabase.table("templates").select("latex_code").eq("id", template_id).execute()
-                if temp_response.data and len(temp_response.data) > 0:
-                    latex_template_to_use = temp_response.data[0]["latex_code"]
-            except Exception as e:
-                print(f"Error fetching template '{template_id}': {e}")
 
-        initial_prompt = f"""Generate a complete LaTeX resume using the user's profile data and the provided template structure.
+        initial_prompt = f"""Generate a complete LaTeX resume using the user's profile data and the fallback template structure.
 
 === USER PROFILE DATA ===
 {user_data}
 
-=== TEMPLATE STRUCTURE TO FOLLOW ===
+=== FALLBACK TEMPLATE STRUCTURE TO FOLLOW ===
 {latex_template_to_use}
 
 === TARGET JOB DESCRIPTION (optimize resume keywords for this role) ===
