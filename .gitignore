@@ -20,6 +20,15 @@ backend/Model/__pycache__/
 backend/SMTP/__pycache__/
 backend/schema/__pycache__/
 backend/__pycache__/
+backend/chroma_db/
+
+# Vector DB / RAG pipeline files and scripts
+backend/Model/rag_engine.py
+backend/scripts/build_vector_db.py
+backend/scripts/test_rag.py
+
+# Raw PDFs / source documents directory
+drive-download-20260627T164927Z-3-001/
 
 # Local LaTeX build artifacts
 *.pdf

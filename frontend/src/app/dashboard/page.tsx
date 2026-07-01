@@ -13,6 +13,7 @@ import {
   Upload, 
   Sparkles, 
   Eye, 
+  Play,
   Download, 
   Plus, 
   Trash2, 
@@ -99,10 +100,12 @@ export default function Dashboard() {
   type LatexVersion = { v: number; ts: string; label: string; latex: string };
   const [latexVersions, setLatexVersions] = useState<LatexVersion[]>([]);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [activeVersion, setActiveVersion] = useState<number | null>(null);
 
   // Photo uploading state
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
+  const chatSessionIdRef = useRef(0);
 
   useEffect(() => {
     setMounted(true);
@@ -132,12 +135,137 @@ export default function Dashboard() {
     setUserId(payload.user_id);
     fetchData(payload.user_id);
 
-    // 3. Load saved LaTeX versions from localStorage
+    // 3. Load saved LaTeX versions, chat history, and builder states from localStorage
     const saved = localStorage.getItem(`cvcraft_versions_${payload.user_id}`);
+    let parsedVersions: LatexVersion[] = [];
     if (saved) {
-      try { setLatexVersions(JSON.parse(saved)); } catch {}
+      try { 
+        parsedVersions = JSON.parse(saved);
+        setLatexVersions(parsedVersions); 
+      } catch {}
+    }
+
+    const savedChat = localStorage.getItem(`cvcraft_chat_${payload.user_id}`);
+    if (savedChat) {
+      try { 
+        const parsedChat = JSON.parse(savedChat);
+        if (parsedChat && parsedChat.length > 0) {
+          setChatHistory(parsedChat);
+        } else if (parsedVersions.length > 0) {
+          setChatHistory([
+            { role: "assistant" as const, content: "Welcome back! I have loaded your saved resume. What changes or improvements would you like to make?" }
+          ]);
+        }
+      } catch {
+        if (parsedVersions.length > 0) {
+          setChatHistory([
+            { role: "assistant" as const, content: "Welcome back! I have loaded your saved resume. What changes or improvements would you like to make?" }
+          ]);
+        }
+      }
+    } else if (parsedVersions.length > 0) {
+      setChatHistory([
+        { role: "assistant" as const, content: "Welcome back! I have loaded your saved resume. What changes or improvements would you like to make?" }
+      ]);
+    }
+
+    let restoredLatex = "";
+    const savedLatex = localStorage.getItem(`cvcraft_latex_${payload.user_id}`);
+    if (savedLatex) {
+      restoredLatex = savedLatex;
+    } else if (parsedVersions.length > 0) {
+      restoredLatex = parsedVersions[parsedVersions.length - 1].latex;
+    }
+
+    if (restoredLatex) {
+      setLatexCode(restoredLatex);
+      // Auto-compile on refresh to load pdf preview
+      handleCompilePdf(restoredLatex, payload.user_id);
+    }
+
+    const savedActiveVer = localStorage.getItem(`cvcraft_active_version_${payload.user_id}`);
+    if (savedActiveVer) {
+      setActiveVersion(Number(savedActiveVer));
+    } else if (parsedVersions.length > 0) {
+      setActiveVersion(parsedVersions.length);
+    }
+
+    const savedJd = localStorage.getItem(`cvcraft_jd_${payload.user_id}`);
+    if (savedJd) setJobDescription(savedJd);
+
+    const savedInstruction = localStorage.getItem(`cvcraft_instruction_${payload.user_id}`);
+    if (savedInstruction) setUserInstruction(savedInstruction);
+
+    const savedContext = localStorage.getItem(`cvcraft_context_${payload.user_id}`);
+    if (savedContext) setContextNote(savedContext);
+
+    const savedTab = localStorage.getItem(`cvcraft_active_tab_${payload.user_id}`);
+    if (savedTab) {
+      setActiveTab(savedTab as any);
+    } else if (parsedVersions.length > 0) {
+      setActiveTab("builder");
     }
   }, []);
+
+  // Sync state changes to localStorage
+  useEffect(() => {
+    if (!userId) return;
+    localStorage.setItem(`cvcraft_active_tab_${userId}`, activeTab);
+  }, [activeTab, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    if (chatHistory.length > 0) {
+      localStorage.setItem(`cvcraft_chat_${userId}`, JSON.stringify(chatHistory));
+    } else {
+      localStorage.removeItem(`cvcraft_chat_${userId}`);
+    }
+  }, [chatHistory, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    if (latexCode) {
+      localStorage.setItem(`cvcraft_latex_${userId}`, latexCode);
+    } else {
+      localStorage.removeItem(`cvcraft_latex_${userId}`);
+    }
+  }, [latexCode, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    if (activeVersion !== null) {
+      localStorage.setItem(`cvcraft_active_version_${userId}`, String(activeVersion));
+    } else {
+      localStorage.removeItem(`cvcraft_active_version_${userId}`);
+    }
+  }, [activeVersion, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    if (jobDescription) {
+      localStorage.setItem(`cvcraft_jd_${userId}`, jobDescription);
+    } else {
+      localStorage.removeItem(`cvcraft_jd_${userId}`);
+    }
+  }, [jobDescription, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    if (userInstruction) {
+      localStorage.setItem(`cvcraft_instruction_${userId}`, userInstruction);
+    } else {
+      localStorage.removeItem(`cvcraft_instruction_${userId}`);
+    }
+  }, [userInstruction, userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    if (contextNote) {
+      localStorage.setItem(`cvcraft_context_${userId}`, contextNote);
+    } else {
+      localStorage.removeItem(`cvcraft_context_${userId}`);
+    }
+  }, [contextNote, userId]);
 
   const toggleTheme = () => {
     const nextTheme = theme === "dark" ? "light" : "dark";
@@ -334,6 +462,7 @@ export default function Dashboard() {
   // API Call: Generate or refine LaTeX resume via Chat Conversational AI
   const handleGenerateResume = async (instructionOverride?: string) => {
     if (!userId) return;
+    const sessionId = chatSessionIdRef.current;
 
     // First generation uses userInstruction; subsequent turns use chatInput
     const isFirstGeneration = chatHistory.length === 0;
@@ -376,6 +505,8 @@ export default function Dashboard() {
         })
       });
 
+      if (chatSessionIdRef.current !== sessionId) return;
+
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.detail || "AI Workspace failed.");
@@ -398,9 +529,13 @@ export default function Dashboard() {
       // Compile immediately to preview
       handleCompilePdf(data.latex_code);
     } catch (err: any) {
-      setStatusMessage({ type: "error", text: err.message || "Failed to generate tailored resume." });
+      if (chatSessionIdRef.current === sessionId) {
+        setStatusMessage({ type: "error", text: err.message || "Failed to generate tailored resume." });
+      }
     } finally {
-      setGenerating(false);
+      if (chatSessionIdRef.current === sessionId) {
+        setGenerating(false);
+      }
     }
   };
 
@@ -413,11 +548,13 @@ export default function Dashboard() {
         { v: prev.length + 1, ts: new Date().toLocaleTimeString(), label, latex }
       ];
       localStorage.setItem(`cvcraft_versions_${uid}`, JSON.stringify(next));
+      setActiveVersion(next.length);
       return next;
     });
   };
 
   const handleResetChat = () => {
+    chatSessionIdRef.current += 1;
     setChatHistory([]);
     setChatInput("");
     setJobDescription("");
@@ -426,7 +563,17 @@ export default function Dashboard() {
     setPdfBlobUrl(null);
     setLatexVersions([]);
     setShowVersionHistory(false);
-    if (userId) localStorage.removeItem(`cvcraft_versions_${userId}`);
+    setActiveVersion(null);
+    if (userId) {
+      localStorage.removeItem(`cvcraft_versions_${userId}`);
+      localStorage.removeItem(`cvcraft_chat_${userId}`);
+      localStorage.removeItem(`cvcraft_latex_${userId}`);
+      localStorage.removeItem(`cvcraft_active_version_${userId}`);
+      localStorage.removeItem(`cvcraft_jd_${userId}`);
+      localStorage.removeItem(`cvcraft_instruction_${userId}`);
+      localStorage.removeItem(`cvcraft_context_${userId}`);
+      localStorage.removeItem(`cvcraft_active_tab_${userId}`);
+    }
     setStatusMessage({ type: "success", text: "New chat session started." });
   };
 
@@ -459,17 +606,18 @@ export default function Dashboard() {
     setLatexCode(v.latex);
     handleCompilePdf(v.latex);
     setShowVersionHistory(false);
+    setActiveVersion(v.v);
     setStatusMessage({ type: "success", text: `Restored to v${v.v}: ${v.label}` });
   };
 
-  // API Call: Compile LaTeX source to PDF
-  const handleCompilePdf = async (codeToCompile = latexCode) => {
-    if (!userId || !codeToCompile.trim()) return;
+  const handleCompilePdf = async (codeToCompile = latexCode, uid = userId) => {
+    if (!uid || !codeToCompile.trim()) return;
+    const sessionId = chatSessionIdRef.current;
     setCompiling(true);
     setStatusMessage(null);
     try {
       const token = localStorage.getItem("token");
-      const res = await fetch(`http://127.0.0.1:8000/api/users/${userId}/compile-pdf`, {
+      const res = await fetch(`http://127.0.0.1:8000/api/users/${uid}/compile-pdf`, {
         method: "POST",
         headers: { 
           "Content-Type": "application/json",
@@ -477,6 +625,8 @@ export default function Dashboard() {
         },
         body: JSON.stringify({ latex_code: codeToCompile })
       });
+
+      if (chatSessionIdRef.current !== sessionId) return;
 
       if (!res.ok) {
         const errorData = await res.json();
@@ -488,11 +638,16 @@ export default function Dashboard() {
       setPdfBlobUrl(localUrl);
       setStatusMessage({ type: "success", text: "PDF compiled successfully!" });
     } catch (err: any) {
-      setStatusMessage({ type: "error", text: err.message || "Compilation failed. Check your LaTeX code syntax." });
+      if (chatSessionIdRef.current === sessionId) {
+        setStatusMessage({ type: "error", text: err.message || "Compilation failed. Check your LaTeX code syntax." });
+      }
     } finally {
-      setCompiling(false);
+      if (chatSessionIdRef.current === sessionId) {
+        setCompiling(false);
+      }
     }
   };
+
 
   // Array handlers helper functions
   const addArrayItem = (key: string, defaultObj: any) => {
@@ -1484,13 +1639,13 @@ export default function Dashboard() {
                       <div className="flex gap-1.5 items-center flex-wrap">
 
                         {/* Version history pill */}
-                        {latexCode && latexVersions.length > 0 && (
+                        {latexVersions.length > 0 && (
                           <div className="relative">
                             <button
                               onClick={() => setShowVersionHistory(v => !v)}
                               className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-500 dark:text-slate-400 hover:border-indigo-400 hover:text-indigo-500 transition flex items-center gap-1.5"
                             >
-                              <FolderKanban size={11} /> v{latexVersions.length}
+                              <FolderKanban size={11} /> {activeVersion !== null ? `v${activeVersion}` : "Versions"}
                             </button>
                             {showVersionHistory && (
                               <div className="absolute right-0 top-8 z-50 w-64 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-xl overflow-hidden">
@@ -1500,15 +1655,24 @@ export default function Dashboard() {
                                 </div>
                                 <div className="max-h-52 overflow-y-auto">
                                   {[...latexVersions].reverse().map(ver => (
-                                    <button
+                                    <div
                                       key={ver.v}
-                                      onClick={() => restoreVersion(ver)}
-                                      className="w-full text-left px-3 py-2 hover:bg-emerald-500/5 border-b border-slate-100 dark:border-slate-900 last:border-0 transition-colors"
+                                      className="flex items-center justify-between px-3 py-2.5 hover:bg-slate-55 dark:hover:bg-slate-900/60 border-b border-slate-100 dark:border-slate-900 last:border-0 transition-colors"
                                     >
-                                      <span className="text-xs font-bold text-emerald-500">v{ver.v}</span>
-                                      <span className="text-xs text-slate-600 dark:text-slate-300 ml-1.5 truncate">{ver.label}</span>
-                                      <span className="block text-[10px] text-slate-400 mt-0.5">{ver.ts}</span>
-                                    </button>
+                                      <div className="flex-1 min-w-0 pr-2">
+                                        <div className="flex items-center gap-1.5">
+                                          <span className="text-xs font-bold text-emerald-500">v{ver.v}</span>
+                                          <span className="text-xs text-slate-600 dark:text-slate-300 truncate block max-w-[120px]">{ver.label}</span>
+                                        </div>
+                                        <span className="block text-[10px] text-slate-400 mt-0.5">{ver.ts}</span>
+                                      </div>
+                                      <button
+                                        onClick={() => restoreVersion(ver)}
+                                        className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 hover:text-white hover:bg-emerald-500 bg-emerald-500/10 px-2 py-1 rounded transition-colors flex-shrink-0"
+                                      >
+                                        Restore
+                                      </button>
+                                    </div>
                                   ))}
                                 </div>
                               </div>
@@ -1521,7 +1685,7 @@ export default function Dashboard() {
                           disabled={compiling || !latexCode.trim()}
                           className="px-3 py-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 text-xs font-semibold flex items-center gap-1.5 transition disabled:opacity-40"
                         >
-                          {compiling ? <Loader2 size={11} className="animate-spin" /> : <Eye size={11} />}
+                          {compiling ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
                           Compile
                         </button>
 
@@ -1559,22 +1723,13 @@ export default function Dashboard() {
                           </div>
                         )
                       ) : (
-                        latexCode ? (
-                          <textarea
-                            value={latexCode}
-                            onChange={(e) => setLatexCode(e.target.value)}
-                            className="w-full h-full p-4 bg-transparent font-mono text-xs focus:ring-0 outline-none leading-relaxed resize-none text-slate-800 dark:text-slate-300 min-h-[460px]"
-                            spellCheck={false}
-                          />
-                        ) : (
-                          <div className="text-center p-8 flex flex-col items-center gap-3 text-slate-400">
-                            <Code size={40} className="text-slate-300 dark:text-slate-600" />
-                            <div>
-                              <h4 className="font-bold text-sm text-slate-500 dark:text-slate-400">LaTeX Code Appears Here</h4>
-                              <p className="text-xs text-slate-400 mt-1 max-w-[200px] mx-auto">Paste a job description and generate your first resume.</p>
-                            </div>
-                          </div>
-                        )
+                        <textarea
+                          value={latexCode}
+                          onChange={(e) => setLatexCode(e.target.value)}
+                          placeholder="% Paste or write your LaTeX code here, then click Compile to render..."
+                          className="w-full h-full p-4 bg-transparent font-mono text-xs focus:ring-0 outline-none leading-relaxed resize-none text-slate-800 dark:text-slate-300 min-h-[460px] bg-white dark:bg-slate-950"
+                          spellCheck={false}
+                        />
                       )}
                     </div>
                   </div>

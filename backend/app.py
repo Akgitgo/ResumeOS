@@ -373,7 +373,6 @@ async def build_resume_endpoint(user_id: str, request: ResumeGenerateRequest, au
             user_instruction=request.user_instruction,
             context_note=request.context_note,
             existing_latex=request.existing_latex,
-            template_id=request.template_id,
             messages=request.messages
         )
             
@@ -398,8 +397,28 @@ async def compile_pdf_endpoint(user_id: str, request: ResumeCompileRequest, auth
         pdf_path = os.path.join(tmp_dir, "resume.pdf")
 
         # Write LaTeX source to file
+        latex_code = request.latex_code
+        try:
+            user_res = supabase_admin.table("users").select("profile_photo_url").eq("id", user_id).execute()
+            if user_res.data:
+                photo_url = user_res.data[0].get("profile_photo_url")
+                if photo_url:
+                    import requests
+                    r = requests.get(photo_url, timeout=15)
+                    if r.status_code == 200:
+                        img_path = os.path.join(tmp_dir, "profile_photo.png")
+                        with open(img_path, "wb") as f_img:
+                            f_img.write(r.content)
+                        # Replace URL in LaTeX with local path
+                        latex_code = latex_code.replace(photo_url, "profile_photo.png")
+                        # Replace escaped URL versions since LLMs sometimes escape LaTeX chars
+                        escaped_url = photo_url.replace("_", "\\_").replace("%", "\\%").replace("&", "\\&")
+                        latex_code = latex_code.replace(escaped_url, "profile_photo.png")
+        except Exception as e:
+            print(f"Error downloading user profile photo: {e}")
+
         with open(tex_path, "w", encoding="utf-8") as f:
-            f.write(request.latex_code)
+            f.write(latex_code)
 
         # Run pdflatex twice to resolve references/TOC
         for _ in range(2):
